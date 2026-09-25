@@ -4,7 +4,8 @@ Semantics
 ---------
 Each input rule has:
 
-* ``cidr``      : an IPv4/IPv6 network in CIDR notation (host bits must be zero)
+* ``cidr``      : an IPv4/IPv6 network in CIDR notation (host bits must be
+  zero; IPv6 interface scopes like ``fe80::%eth0/128`` are rejected)
 * ``action``    : ``permit`` (allow) or ``deny`` (block); aliases accepted
 * ``priority``  : integer, **smaller value = higher priority**
 * ``source_tag``: free-form label identifying where the rule came from
@@ -64,6 +65,25 @@ class ValidationError(Exception):
     """Raised when a submitted rule set is structurally invalid."""
 
 
+#: Rejection reason shared by every entry point for scoped (zoned) IPv6 CIDR
+#: literals such as ``fe80::%eth0/128``.
+SCOPED_CIDR_REASON = "interface scope identifiers ('%zone') are not supported"
+
+
+def has_interface_scope(text: str) -> bool:
+    """Whether a CIDR literal carries an IPv6 interface scope (``%zone``).
+
+    ``ipaddress`` accepts scoped IPv6 networks (``fe80::%eth0/128``), but the
+    scope id makes the result overlap its unscoped twin without containing
+    it: ``fe80::/128`` and ``fe80::%eth0/128`` would be analysed as two
+    distinct winning networks over the *same* address while the decision map
+    reports a single action — silent coverage distortion.  Network policy has
+    no notion of interface scopes, so every entry point rejects such CIDRs.
+    (A ``%`` can never occur in a valid unscoped IPv4/IPv6 CIDR.)
+    """
+    return "%" in text
+
+
 def normalize_action(value: Any) -> str:
     if not isinstance(value, str):
         raise ValidationError(f"action must be a string, got {value!r}")
@@ -121,9 +141,14 @@ def _parse_rule(raw: Any, index: int) -> InputRule:
     cidr = raw["cidr"]
     if not isinstance(cidr, str):
         raise ValidationError(f"rule #{index + 1}: cidr must be a string")
+    text = cidr.strip()
+    if has_interface_scope(text):
+        raise ValidationError(
+            f"rule #{index + 1}: invalid CIDR {cidr!r} ({SCOPED_CIDR_REASON})"
+        )
     try:
         # strict=True rejects inputs with host bits set, e.g. 10.0.0.5/24.
-        network = ipaddress.ip_network(cidr.strip(), strict=True)
+        network = ipaddress.ip_network(text, strict=True)
     except ValueError as exc:
         raise ValidationError(f"rule #{index + 1}: invalid CIDR {cidr!r} ({exc})")
 

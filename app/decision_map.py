@@ -34,7 +34,7 @@ from typing import Any
 
 # Reuse the engine's canonical network sorting / subtraction helpers so the
 # geometry behaves exactly like in analysis and diff.
-from .analyzer import _sort_networks, _subtract
+from .analyzer import SCOPED_CIDR_REASON, _sort_networks, _subtract, has_interface_scope
 
 Network = ipaddress._BaseNetwork
 
@@ -50,7 +50,9 @@ def parse_query_cidr(raw: Any) -> Network:
     """Parse a strict IPv4/IPv6 CIDR query parameter.
 
     A prefix length is mandatory (a bare address is not a CIDR query) and host
-    bits must be zero; anything else raises :class:`DecisionMapError`.
+    bits must be zero; scoped (zoned) IPv6 literals such as
+    ``fe80::%eth0/128`` are rejected — network policy has no notion of
+    interface scopes.  Anything else raises :class:`DecisionMapError`.
     """
     if not isinstance(raw, str) or not raw.strip():
         raise DecisionMapError("cidr query parameter is required")
@@ -59,6 +61,8 @@ def parse_query_cidr(raw: Any) -> Network:
         raise DecisionMapError(
             f"invalid CIDR {raw!r}; an explicit prefix length is required (e.g. '10.0.0.0/8')"
         )
+    if has_interface_scope(text):
+        raise DecisionMapError(f"invalid CIDR {raw!r} ({SCOPED_CIDR_REASON})")
     try:
         # strict=True rejects host bits, e.g. 10.0.0.5/24 and 2001:db8::1/32.
         return ipaddress.ip_network(text, strict=True)

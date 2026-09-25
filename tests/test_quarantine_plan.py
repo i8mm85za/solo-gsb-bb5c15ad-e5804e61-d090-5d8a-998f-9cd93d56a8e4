@@ -333,7 +333,7 @@ def test_rule_id_collision_is_400_and_reports_ids(client: TestClient) -> None:
 
 def test_invalid_target_cidr_is_400_before_lookup(client: TestClient) -> None:
     aid = _save(client, [{"cidr": "10.0.0.0/8", "action": "permit"}])
-    for bad in ("10.0.0.5/24", "10.0.0.0", "nonsense", "10.0.0.0/33"):
+    for bad in ("10.0.0.5/24", "10.0.0.0", "nonsense", "10.0.0.0/33", "fe80::%eth0/128"):
         r = client.post(
             f"/api/analyses/{aid}/quarantine-plan",
             json={"cidr": bad, "rule_id_prefix": "q"},

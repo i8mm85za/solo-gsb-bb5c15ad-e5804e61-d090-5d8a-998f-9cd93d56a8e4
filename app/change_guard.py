@@ -40,7 +40,7 @@ from typing import Any, Iterable
 
 # Reuse the engine's canonical sorting / subtraction helpers and the diff's
 # transition vocabulary rather than re-implementing them here.
-from .analyzer import _sort_networks, _subtract
+from .analyzer import SCOPED_CIDR_REASON, _sort_networks, _subtract, has_interface_scope
 from .diff import CHANGE_TYPE_ORDER, Action, change_type_name, diff_analyses
 
 Network = ipaddress._BaseNetwork
@@ -103,7 +103,8 @@ def parse_guard_entries(raw_entries: Any) -> list[GuardGrant]:
     """Validate raw authorization entries and return deduplicated grants.
 
     Every entry must carry a *strict* CIDR (explicit prefix length, host bits
-    zero) and two different actions out of ``permit`` / ``deny`` / ``none``.
+    zero, no IPv6 interface scope) and two different actions out of
+    ``permit`` / ``deny`` / ``none``.
     Entries of the same (family, transition) may nest or repeat (they are
     unioned later); entries of **different** transitions must not overlap.
     All problems are collected and raised as one :class:`ChangeGuardError`.
@@ -135,6 +136,9 @@ def parse_guard_entries(raw_entries: Any) -> list[GuardGrant]:
                     f"{label}: invalid CIDR {cidr!r}; an explicit prefix length is "
                     "required (e.g. '10.0.0.0/8')"
                 )
+            elif has_interface_scope(text):
+                # Scoped (zoned) IPv6 CIDRs are not supported anywhere.
+                issues.append(f"{label}: invalid CIDR {cidr!r} ({SCOPED_CIDR_REASON})")
             else:
                 try:
                     # strict=True rejects host bits, e.g. 10.0.0.5/24.

@@ -237,7 +237,8 @@ def test_ipv6_query(client: TestClient) -> None:
 
 def test_invalid_cidr_returns_400(client: TestClient) -> None:
     aid = _save(client, [{"cidr": "10.0.0.0/8", "action": "permit"}])
-    for bad in ("10.0.0.5/24", "10.0.0.0", "not-a-cidr", "2001:db8::1/32", "10.0.0.0/33"):
+    for bad in ("10.0.0.5/24", "10.0.0.0", "not-a-cidr", "2001:db8::1/32", "10.0.0.0/33",
+                "fe80::%eth0/128"):
         r = client.get(f"/api/analyses/{aid}/decision-map", params={"cidr": bad})
         assert r.status_code == 400, (bad, r.status_code)
         assert r.json()["error"] == "invalid_cidr"
