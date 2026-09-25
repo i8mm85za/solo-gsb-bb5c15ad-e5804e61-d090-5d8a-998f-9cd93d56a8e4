@@ -60,7 +60,7 @@ python -m pytest -q
 
 | 字段 | 说明 |
 | --- | --- |
-| `cidr` | IPv4/IPv6 CIDR，如 `10.0.0.0/8`、`2001:db8::/32`；**主机位必须为 0**（`10.0.0.5/24` 会被拒绝） |
+| `cidr` | IPv4/IPv6 CIDR，如 `10.0.0.0/8`、`2001:db8::/32`；**主机位必须为 0**（`10.0.0.5/24` 会被拒绝）。**不支持 IPv6 接口作用域**：带 `%` 区域标识的写法（如 `fe80::%eth0/128`、`fe80::%1/64`）在所有 CIDR 入口一律拒绝——策略模型没有"接口"这一维度，作用域标记会让同一整数地址产生两个不同标识的网段，破坏同网段归并与决策地图；提交时去掉 `%` 及其后的区域标识（`fe80::/128`）即可 |
 | `action` | `permit`（别名 `allow`/`accept`/`pass`）或 `deny`（别名 `block`/`drop`/`reject`），大小写不敏感 |
 | `priority` | 整数，**数值越小优先级越高**，默认 `100`。仅用于裁决**完全相同 CIDR** 的规则 |
 | `source_tag` | 来源标签（自由文本），默认 `default`，如 `hq` / `edge-fw` / `terraform` |
@@ -77,6 +77,27 @@ python -m pytest -q
    - 碎片为空 → `status: "shadowed"`（完全遮蔽）
    - 有碎片且存在子节点 → `status: "partial"`（部分重叠）
    - 无子节点 → `status: "active"`
+
+### 不支持 IPv6 接口作用域（`%zone`）
+
+所有 CIDR 输入都**不接受 IPv6 接口作用域**（RFC 4007 的区域标识，即 `%` 及其后的接口名/
+序号），例如 `fe80::%eth0/128`、`fe80::1%2/64`。网络策略里没有"接口"这一维度，而标准库
+会保留该区域标识：`fe80::/128` 与 `fe80::%eth0/128` 的整数网络地址相同（哈希相同）却互不
+相等，若同时被接受会被当成**两个胜出网段**，而由已保存 CIDR 字符串重建的决策地图只报告
+其中一个动作，造成覆盖失真。因此带 `%` 的 CIDR 在各入口**按该入口既有的错误格式直接拒绝，
+整批请求不保存、不返回部分结果**：
+
+| 入口 | 拒绝形式 |
+| --- | --- |
+| `POST /api/analyze`（规则提交） | `400 invalid_ruleset`（整批规则不保存） |
+| `POST .../simulate`（add/replace 规则） | `400 invalid_ruleset`（预演不落库，基准不变） |
+| `POST .../merge-precheck`（A/B 批次 add/replace） | `400 invalid_ruleset`（不返回任何预检/合并结果） |
+| `GET .../decision-map?cidr=...`（决策地图查询） | `400 invalid_cidr` |
+| `POST .../quarantine-plan`（临时封禁目标 `cidr`） | `400 invalid_cidr`（先于版本查询校验） |
+| `POST .../change-guard`（授权条目 `cidr`） | `400 invalid_change_guard`，问题进 `issues`（整组授权不返回裁决） |
+
+去掉区域标识即得到合法的普通 IPv6 CIDR（`fe80::%eth0/128` → `fe80::/128`）。普通 IPv4/IPv6
+CIDR 不受影响，同网段（去作用域后）仍按优先级 + 提交顺序裁决。
 
 ### 最小冲突对（minimal_conflict_pairs）
 
@@ -230,7 +251,8 @@ curl -sOJ "http://localhost:8080/api/analyses/an_e38b58f57faf2325/export.json"
 - 每个 `rule_id` 在整批中**最多成为一个操作的目标**（同一列表重复、跨列表同时出现都拒绝）；
 - 补丁后规则集不能为空（不能删光所有规则）；
 - 新增/替换规则里的 CIDR、action 仍按既有规则校验，非法时返回与 `/api/analyze` 一致的
-  `400 invalid_ruleset`；字段层面错误（未知字段、缺 `rule_id`、未知 action 等）返回 `422`。
+  `400 invalid_ruleset`（包括带 `%` 的 IPv6 接口作用域 CIDR，如 `fe80::%eth0/128`）；
+  字段层面错误（未知字段、缺 `rule_id`、未知 action 等）返回 `422`。
 
 删除或改写更具体的子网规则后，**祖先规则会在让出的范围上重新生效**：例如
 `permit 10.0.0.0/8 → deny 10.1.0.0/16 → permit 10.1.1.0/24` 中删掉 deny /16 后，
@@ -422,7 +444,8 @@ curl -s -X POST http://localhost:8080/api/analyses/an_e38b58f57faf2325/merge-pre
 
 - 任一批次非法（未知/重复目标、add 撞基线 ID、单批删光、空批次等）→ `400`
   `invalid_simulation`，`issues` 一次性列出全部问题（A 先于 B 校验）；
-- 批次内新增/替换规则 CIDR、action 非法 → `400 invalid_ruleset`；
+- 批次内新增/替换规则 CIDR、action 非法（含带 `%` 的 IPv6 接口作用域 CIDR）→
+  `400 invalid_ruleset`，不返回任何预检/合并结果；
 - 字段层面错误（缺 `a`/`b`、未知顶层字段、操作对象多余字段、未知 action 等）→ `422`；
 - 基准版本不存在 → `404`。
 
@@ -597,7 +620,8 @@ permit /24 洞之外都已是 deny，因此只生成一条规则，实际转 den
 - 生成的 ID（`<前缀>1, <前缀>2, ...`）**撞上基线中已有 rule_id** → `400`，形如
   `{"error": "invalid_quarantine_plan", "detail": "generated rule_id(s) collide ...: q1; ..."}`
   （一次性列出所有撞号的生成 ID，换一个前缀即可）；
-- 目标 CIDR 非法（主机位非零、缺前缀长度等）→ `400 invalid_cidr`（先校验 CIDR，再查版本）；
+- 目标 CIDR 非法（主机位非零、缺前缀长度、IPv6 接口作用域如 `fe80::%eth0/128` 等）→
+  `400 invalid_cidr`（先校验 CIDR，再查版本）；
 - 字段层面错误（缺 `cidr`/`rule_id_prefix`、前缀为空白、多余字段等）→ `422`；
 - 基准版本不存在 → `404`。
 
@@ -931,7 +955,7 @@ curl -s "http://localhost:8080/api/analyses/an_e38b58f57faf2325/decision-map?cid
 错误码：
 
 - CIDR 非法（语法错误、主机位非零如 `10.0.0.5/24`、缺少前缀长度如 `10.0.0.0`、
-  地址族不合法等）→ `400`，形如
+  IPv6 接口作用域如 `fe80::%eth0/128`、地址族不合法等）→ `400`，形如
   `{"error": "invalid_cidr", "detail": "invalid CIDR '10.0.0.5/24' (...)"}`
   （先校验查询参数，再查版本）；缺少 `cidr` 参数 → `422`；
 - 版本不存在 → `404`。
@@ -1216,7 +1240,7 @@ curl -s -X POST http://localhost:8080/api/analyses/an_0a34f5ffbbdcf273/change-gu
 与 diff 一样，全部计算都是 CIDR 几何运算，不逐地址枚举，IPv6 全空间也能精确处理。错误码：
 
 - ID 格式非法或两个 ID 相同 → `400`（先校验 ID，再校验授权条目，最后查存在性）；
-- 授权 CIDR 非法、异类授权相互重叠 → `400`，形如
+- 授权 CIDR 非法（含 IPv6 接口作用域如 `fe80::%eth0/128`）、异类授权相互重叠 → `400`，形如
   `{"error": "invalid_change_guard", "detail": "...", "issues": ["...全部问题..."]}`；
 - 字段层面错误（`from_action == to_action`、未知动作、空 `authorizations`、多余字段等）→ `422`；
 - 任一版本不存在 → `404`。
@@ -1331,16 +1355,19 @@ curl -s "http://localhost:8080/api/active/history?limit=50&offset=0"
 
 ### 错误处理
 
-- 非法 CIDR（语法错误、主机位非零、rule_id 重复等）→ `400`，形如
+- 非法 CIDR（语法错误、主机位非零、IPv6 接口作用域如 `fe80::%eth0/128`、rule_id 重复等）→ `400`，形如
   `{"error": "invalid_ruleset", "detail": "rule #1: invalid CIDR '10.0.0.5/24' (...)"}`
+  （整批规则不保存、不返回部分结果）
 - 预演/合并预检批次非法（add 撞已有 ID、replace/remove 未命中基准、同一目标在单批内出现
   多次、单批删光所有规则、空批次等）→ `400`，形如
   `{"error": "invalid_simulation", "detail": "...", "issues": ["...全部问题..."]}`
   （合并预检中同一 `rule_id` 被 A、B 两批同时操作属于**语义冲突**，返回 `200` 且
-  `passed: false`，不是 400）
-- 决策地图 CIDR 查询非法（主机位非零、缺前缀长度等）→ `400`，形如
+  `passed: false`，不是 400）；批次内新增/替换规则 CIDR 非法（含 IPv6 接口作用域）按
+  `/api/analyze` 返回 `400 invalid_ruleset`，不返回预演/预检结果
+- 决策地图 CIDR 查询非法（主机位非零、缺前缀长度、IPv6 接口作用域等）→ `400`，形如
   `{"error": "invalid_cidr", "detail": "invalid CIDR '10.0.0.5/24' (...)"}`
-- 变更守卫授权集非法（授权 CIDR 非严格 CIDR、异类授权相互重叠等）→ `400`，形如
+  （临时封禁目标 CIDR 同此错误）
+- 变更守卫授权集非法（授权 CIDR 非严格 CIDR、含 IPv6 接口作用域、异类授权相互重叠等）→ `400`，形如
   `{"error": "invalid_change_guard", "detail": "...", "issues": ["...全部问题..."]}`
 - 临时封禁方案生成的 rule_id 撞上基线已有 ID → `400`，形如
   `{"error": "invalid_quarantine_plan", "detail": "generated rule_id(s) collide ...: q1; ..."}`
@@ -1378,6 +1405,7 @@ curl -s "http://localhost:8080/api/active/history?limit=50&offset=0"
 │   ├── db.py            # SQLite 持久层（analyses / rules / findings / active_pointer / active_history 五表）
 │   └── main.py          # FastAPI 路由
 ├── tests/test_api.py           # 端到端测试（pytest + TestClient）
+├── tests/test_scoped_ipv6_cidr.py # IPv6 接口作用域（%zone）CIDR 各入口拒绝 + 普通 CIDR/同网段裁决回归
 ├── tests/test_containment_index.py # 包含树前缀索引测试（稀疏/嵌套性能与结果、与 O(n²) 扫描等价、analyze 与预演一致）
 ├── tests/test_active.py        # 发布指针与乐观锁（含并发发布）测试
 ├── tests/test_diff.py          # 语义差异端点测试

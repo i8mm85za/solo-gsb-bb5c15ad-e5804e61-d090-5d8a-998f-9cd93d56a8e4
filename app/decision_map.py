@@ -32,9 +32,10 @@ import ipaddress
 from collections import defaultdict
 from typing import Any
 
-# Reuse the engine's canonical network sorting / subtraction helpers so the
-# geometry behaves exactly like in analysis and diff.
-from .analyzer import _sort_networks, _subtract
+# Reuse the engine's canonical network sorting / subtraction helpers and the
+# shared strict-CIDR parser so the geometry and validation behave exactly like
+# in analysis and the quarantine-plan target.
+from .analyzer import _sort_networks, _subtract, strict_ip_network
 
 Network = ipaddress._BaseNetwork
 
@@ -60,8 +61,10 @@ def parse_query_cidr(raw: Any) -> Network:
             f"invalid CIDR {raw!r}; an explicit prefix length is required (e.g. '10.0.0.0/8')"
         )
     try:
-        # strict=True rejects host bits, e.g. 10.0.0.5/24 and 2001:db8::1/32.
-        return ipaddress.ip_network(text, strict=True)
+        # strict parsing rejects host bits, e.g. 10.0.0.5/24 and
+        # 2001:db8::1/32, as well as IPv6 interface-scope zone ids such as
+        # fe80::%eth0/128, which the policy model cannot represent.
+        return strict_ip_network(text)
     except ValueError as exc:
         raise DecisionMapError(f"invalid CIDR {raw!r} ({exc})") from None
 

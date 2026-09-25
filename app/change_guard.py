@@ -38,9 +38,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-# Reuse the engine's canonical sorting / subtraction helpers and the diff's
-# transition vocabulary rather than re-implementing them here.
-from .analyzer import _sort_networks, _subtract
+# Reuse the engine's canonical sorting / subtraction helpers, the diff's
+# transition vocabulary and the shared strict-CIDR parser rather than
+# re-implementing them here.
+from .analyzer import _sort_networks, _subtract, strict_ip_network
 from .diff import CHANGE_TYPE_ORDER, Action, change_type_name, diff_analyses
 
 Network = ipaddress._BaseNetwork
@@ -137,8 +138,9 @@ def parse_guard_entries(raw_entries: Any) -> list[GuardGrant]:
                 )
             else:
                 try:
-                    # strict=True rejects host bits, e.g. 10.0.0.5/24.
-                    network = ipaddress.ip_network(text, strict=True)
+                    # strict parsing rejects host bits, e.g. 10.0.0.5/24, and
+                    # IPv6 interface-scope zone ids such as fe80::%eth0/128.
+                    network = strict_ip_network(text)
                 except ValueError as exc:
                     issues.append(f"{label}: invalid CIDR {cidr!r} ({exc})")
 
